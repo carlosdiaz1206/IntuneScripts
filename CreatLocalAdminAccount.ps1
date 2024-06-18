@@ -11,11 +11,6 @@ This is a sample script and is shared with no warranty.
 The purpose of this script is to create a local administrator account to be used as an initial account for LAPS.
 #>
 
-
-
-
-
-
 # Username and Password
 $username = "sample"
 $password = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
