@@ -1,0 +1,348 @@
+<#
+ 
+COPYRIGHT
+Copyright (c) Microsoft Corporation. All rights reserved. Licensed under the MIT license.
+See LICENSE in the project root for license information.
+
+
+Version History
+1.0    Carlos Diaz 05/20/2023     Initial version
+
+This is a sample script and is shared with no warranty. 
+The purpose of this script is to create a group hierarchy that consists of a Top Level Group 
+and nest a Windows Device Group, iOS Device Group, and Android Device Group under the top level. 
+The script then creates an AdminGroup to contain administrators for that scope, scope tag, and 
+assigns all to the Role selected from the menu.
+
+Special thanks to Garrett Adam Phillips for his input in the script. 
+
+The script reads the variables from a text file located at C:\Temp\Variables.csv. 
+The text file should contain one set of variables per line in the following order: 
+Tag,SiteName
+
+#>
+
+# Find the permissions needed for this operation
+# Find-MgGraphCommand -command Get-MgGroup | Select -First 1 -ExpandProperty Permissions
+# Find-MgGraphCommand -command Get-MgGroupMember | Select -First 1 -ExpandProperty Permissions
+# Find-MgGraphCommand -command Get-MgUser | Select -First 1 -ExpandProperty Permissions
+# Find-MgGraphCommand -command New-MgGroup | Select -First 1 -ExpandProperty Permissions
+
+# Get-Command -Module Microsoft.Graph.Groups, Microsoft.Graph.Users
+
+if (Get-Module -ListAvailable -Name Microsoft.Graph.Groups) {
+    Write-Host "Microsoft.Graph.Groups Module Already Installed" -ForegroundColor Green
+} 
+else {
+    Write-Host "Microsoft.Graph.Groups Module Not Installed. Installing........." -ForegroundColor Red
+        Install-Module -Name Microsoft.Graph.Groups -AllowClobber -Force
+    Write-Host "Microsoft.Graph.Groups Module Installed" -ForegroundColor Green
+}
+if (Get-Module -ListAvailable -Name Microsoft.Graph.Users) {
+    Write-Host "Microsoft.Graph.Users Module Already Installed" -ForegroundColor Green
+} 
+else {
+    Write-Host "Microsoft.Graph.Users Module Not Installed. Installing........." -ForegroundColor Red
+        Install-Module -Name Microsoft.Graph.Users -AllowClobber -Force
+    Write-Host "Microsoft.Graph.Users Module Installed" -ForegroundColor Green
+}
+
+Import-Module Microsoft.Graph.Groups
+Import-Module Microsoft.Graph.Users
+
+# Confirm you have the correct scopes
+$RequiredScopes = @("DeviceManagementConfiguration.ReadWrite.All", "DeviceManagementRBAC.ReadWrite.All", "Directory.Read.All", "Directory.ReadWrite.All", "Group.Read.All", "GroupMember.ReadWrite.All", "GroupMember.Read.All", "DeviceManagementRBAC.ReadWrite.All")
+
+Connect-MgGraph -Scopes $RequiredScopes
+
+function Test-AzureADGroupMembership {
+    param (
+        [string]$GroupName,
+        [string]$UserUPN
+    )
+
+    try {
+        $group = Get-MgGroup -Search "DisplayName:$($GroupName)" -ConsistencyLevel eventual
+        $user = Get-MgUser -Filter "UserPrincipalName eq '$($UserUPN)'"
+
+        if ($group -ne $null -and $user -ne $null) {
+            $isMember = Get-MgGroupMember -GroupId $group.Id -All | Where-Object { $_.UserPrincipalName -eq $UserUPN }
+            if ($isMember -ne $null) {
+                Write-Host "$UserUPN is a member of $GroupName."
+            } else {
+                Write-Host "$UserUPN is not a member of $GroupName."
+            }
+        } else {
+            Write-Host "Group or User not found."
+        }
+    } catch {
+        Write-Host "An error occurred: $_"
+    }
+}
+
+$Groups = ""
+$Groups = Import-Csv "c:\temp\variables.csv"
+
+# Select the role you want to assign
+$Role = Get-MgDeviceManagementRoleDefinition | Select-Object displayname,ID | Out-GridView -OutputMode Single -Title "Select Role"
+
+
+foreach ($Group in $Groups) {
+
+    # Create a new group for Top Level Scoping
+    $SearchGroupName = "EID-Site-"+$Group.Tag+"-"+$Group.SiteName
+    write-host $SearchGroupName -ForegroundColor Yellow
+    $SiteGroup = Get-MgGroup -Filter "DisplayName eq '$SearchGroupName'"
+
+    if ($SiteGroup.Id)
+    {
+        Write-Host "The Top Level group already exists." -ForegroundColor Red
+    }
+    else
+    {
+        $SiteGroup = ""
+        $SiteGroupBody = @{
+            DisplayName = "EID-Site-"+$Group.Tag+"-"+$Group.SiteName
+            Description = "Top Level Group for Site "+$Group.SiteName
+            MailEnabled = $false
+            MailNickname = $Group.Tag+"toplevelgroup"
+            SecurityEnabled = $true
+            isAssignableToRole = $false
+            GroupTypes = @(
+            )
+        }
+        $SiteGroup = New-MgGroup -BodyParameter $SiteGroupBody
+    }
+
+    # Search for Admin Group
+    $SearchAdminGroupName = $Group.Tag+"_Admins"
+    Write-Host $SearchAdminGroupName -ForegroundColor Yellow
+
+    $AdminGroup = Get-MgGroup -Filter "DisplayName eq '$($SearchAdminGroupName)'"
+
+    if ($AdminGroup.Id)
+    {
+        Write-Host "The Admin group already exists." -ForegroundColor Red
+    }
+    else
+    {
+        $AdminGroup = ""
+        $AdminGroupBody = @{
+            DisplayName = $SearchAdminGroupName
+            Description = "Admin Group for Site "+$Group.SiteName
+            MailEnabled = $false
+            MailNickname = $SearchAdminGroupName
+            SecurityEnabled = $true
+            isAssignableToRole = $false
+            GroupTypes = @(
+            )
+        }
+        $AdminGroup = New-MgGroup -BodyParameter $AdminGroupBody
+    }
+
+    # Create a new Windows Device group
+    $SearchGroupWindowsName = $Group.Tag+"_WindowsDevices"
+    write-host $SearchGroupWindowsName -ForegroundColor Yellow
+    $ScopeGroupWindows = Get-MgGroup -Filter "DisplayName eq '$SearchGroupWindowsName'"
+
+    if ($ScopeGroupWindows.Id)
+    {
+        Write-Host "The Windows group already exists." -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host "The group will now be created."
+        $ScopeGroupWindowsBody = @{
+            DisplayName = $Group.Tag+"_WindowsDevices"
+            Description = "Windows Device Group for Site "+$Group.SiteName
+            MailEnabled = $false
+            MailNickname = $Group.Tag+"WindowsDeviceGroup"
+            SecurityEnabled = $true
+            isAssignableToRole = $false
+            membershipRuleProcessingState = 'On'
+            MembershipRule = "(device.managementType -eq ""MDM"") and (device.deviceOSType -in [""Windows""]) and (device.displayName -startsWith """+$Group.Tag+""")"
+            GroupTypes = @(
+                'DynamicMembership'
+            )
+        }
+        $ScopeGroupWindows = New-MgGroup -BodyParameter $ScopeGroupWindowsBody
+    }
+
+    # Create a new iOS group
+    $SearchGroupIOSName = $Group.Tag+"_IOSDevices"
+    write-host $SearchGroupIOSName -ForegroundColor Yellow
+    $ScopeGroupIOS = Get-MgGroup -Filter "DisplayName eq '$SearchGroupIOSName'"
+
+    if ($ScopeGroupIOS.Id)
+    {
+        Write-Host "The iOS group already exists." -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host "The group will now be created."
+        $ScopeGroupIOSBody = @{
+            DisplayName = $Group.Tag+"_IOSDevices"
+            Description = "iOS Device Group for Site "+$Group.SiteName
+            MailEnabled = $false
+            MailNickname = $Group.Tag+"IOSDeviceGroup"
+            SecurityEnabled = $true
+            isAssignableToRole = $false
+            membershipRuleProcessingState = 'On'
+            MembershipRule = "(device.managementType -eq ""MDM"") and (device.deviceOSType -in [""iOS"", ""iPad"", ""iPadOS"", ""iPhone""]) and (device.displayName -startsWith """+$Group.Tag+""")"
+            GroupTypes = @(
+                'DynamicMembership'
+            )
+        }
+        $ScopeGroupIOS = New-MgGroup -BodyParameter $ScopeGroupIOSBody
+    }
+
+    # Create a new MacOS group
+    $SearchGroupMacOSName = $Group.Tag+"_MACOSDevices"
+    write-host $SearchGroupMacOSName -ForegroundColor Yellow
+    $ScopeGroupMacOS = Get-MgGroup -Filter "DisplayName eq '$SearchGroupMacOSName'"
+
+    if ($ScopeGroupMacOS.Id)
+    {
+        Write-Host "The MacOS group already exists." -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host "The group will now be created."
+        $ScopeGroupMacOSBody = @{
+            DisplayName = $Group.Tag+"_MACOSDevices"
+            Description = "MacOS Device Group for Site "+$Group.SiteName
+            MailEnabled = $false
+            MailNickname = $Group.Tag+"MacOSDeviceGroup"
+            SecurityEnabled = $true
+            isAssignableToRole = $false
+            membershipRuleProcessingState = 'On'
+            MembershipRule = "(device.managementType -eq ""MDM"") and (device.deviceOSType -in [""MacOS"", ""macOS""]) and (device.displayName -startsWith """+$Group.Tag+""")"
+            GroupTypes = @(
+                'DynamicMembership'
+            )
+        }
+        $ScopeGroupMacOS = New-MgGroup -BodyParameter $ScopeGroupMacOSBody
+    }
+
+    # Create a new Android group
+    $SearchGroupAndroidName = $Group.Tag+"_AndroidDevices"
+    write-host $SearchGroupAndroidName -ForegroundColor Yellow
+    $ScopeGroupAndroid = Get-MgGroup -Filter "DisplayName eq '$SearchGroupAndroidName'"
+
+    if ($ScopeGroupAndroid.Id)
+    {
+        Write-Host "The Android group already exists." -ForegroundColor Red
+    }
+    else
+    {
+        Write-Host "The group will now be created."
+        $ScopeGroupAndroidBody = @{
+        DisplayName = $Group.Tag+"_AndroidDevices"
+        Description = "Android Device Group for Site "+$Group.SiteName
+        MailEnabled = $false
+        MailNickname = $Group.Tag+"AndroidDeviceGroup"
+        SecurityEnabled = $true
+        isAssignableToRole = $false
+        membershipRuleProcessingState = 'On'
+        MembershipRule = "(device.managementType -eq ""GoogleCloudDevice"") and (device.deviceOSType -in [""Android"", ""AndroidEnterprise""]) and (device.displayName -startsWith """+$Group.Tag+""")"
+        GroupTypes = @(
+            'DynamicMembership'
+        )
+        }
+        $ScopeGroupAndroid = New-MgGroup -BodyParameter $ScopeGroupAndroidBody
+    }
+
+    # Query for Site StaffGroup
+    $SearchGroupStaffUsers = $Group.Tag+"StaffUsers"
+    $ScopeGroupStaffUsers = Get-MgGroup -Filter "DisplayName eq '$($SearchGroupStaffUsers)'"
+
+    # Query for Site StudentGroup
+    $SearchGroupStudentUsers = $Group.Tag+"StudentUsers"
+    $ScopeGroupStudentUsers = Get-MgGroup -Filter "DisplayName eq '$($SearchGroupStudentUsers)'"
+
+   
+    # Add the Windows, iOS, MACOS and Android groups to the Site Top-level group
+    New-MgGroupMember -GroupId $SiteGroup.Id -DirectoryObjectId $ScopeGroupAndroid.Id	
+    New-MgGroupMember -GroupId $SiteGroup.Id -DirectoryObjectId $ScopeGroupIOS.Id
+    New-MgGroupMember -GroupId $SiteGroup.Id -DirectoryObjectId $ScopeGroupMacOS.Id
+    New-MgGroupMember -GroupId $SiteGroup.Id -DirectoryObjectId $ScopeGroupWindows.Id
+
+    if ($ScopeGroupStaffUsers.Id) {New-MgGroupMember -GroupId $SiteName.Id -DirectoryObjectId $ScopeGroupStaffUsers.Id}
+    if ($ScopeGroupStudentUsers.Id) {New-MgGroupMember -GroupId $SiteName.Id -DirectoryObjectId $ScopeGroupStudentUsers.Id}
+
+# Create the scope tag using the Microsoft Graph API
+
+$Tag = $Group.Tag
+
+$uri = "https://graph.microsoft.com/beta/deviceManagement/roleScopeTags"
+
+$body = @"
+{
+    "displayName": "$($tag)",
+    "description": "$($Group.SiteName)"
+}
+"@
+
+$ScopeTagId = (Invoke-MgGraphRequest -Method POST -Uri $uri -Body $body).id 
+
+
+# Assign Top-Level Groups to Scope Tag
+
+$uri = "https://graph.microsoft.com/beta/deviceManagement/roleScopeTags/$($ScopeTagId)/assign"
+
+$tlgjson = @"
+{
+    "assignments": [
+        {
+            "target": {
+                "@odata.type": "#microsoft.graph.groupAssignmentTarget",
+                "groupId": "$($SiteGroup.Id)"
+            }
+        }
+    ]
+}
+"@
+
+Invoke-MgGraphRequest -Method POST -Uri $uri -Body $tlgjson
+
+# Create Intune Role Assignment using Microsoft Graph API
+
+$uri = "https://graph.microsoft.com/beta/deviceManagement/roleAssignments"
+
+$myJson = @"  
+{  
+    "id": "",  
+    "description": "<desc>",  
+    "displayName": "<displayn>",  
+    "members": [  
+        "<lsagroupid>"  
+    ],  
+    "resourceScopes": [  
+        "<groupid>"  
+    ],  
+    "roleDefinition@odata.bind": "https://graph.microsoft.com/beta/deviceManagement/roleDefinitions('<defid>')",  
+    "roleScopeTags@odata.bind": [  
+        "https://graph.microsoft.com/beta/deviceManagement/roleScopeTags('<tagid>')"  
+    ]  
+}  
+"@  
+$assignmentName = $Group.Tag+"-"+$Group.SiteName  
+$bodyJSON = $myJson -replace '<desc>',""  
+$bodyJSON = $bodyJSON -replace '<displayn>',$assignmentName  
+$bodyJSON = $bodyJSON -replace '<lsagroupid>',$AdminGroup.Id  
+$bodyJSON = $bodyJSON -replace '<groupid>',$SiteGroup.Id 
+$bodyJSON = $bodyJSON -replace '<defid>',$Role.Id
+$bodyJSON = $bodyJSON -replace '<tagid>',$ScopeTagId
+
+
+$uri = "https://graph.microsoft.com/beta/deviceManagement/roleAssignments"
+
+Invoke-MgGraphRequest -Method POST -Uri $uri -Body $bodyJSON
+
+}
+
+<#
+We need to disconnect from any sources after the script is finished.
+
+Disconnect-MgGraph
+#>
